@@ -9,6 +9,15 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Load .env variables
+        run: |
+          if [ -f .env ]; then
+            cat .env >> $GITHUB_ENV
+            echo "✅ تم تحميل المتغيرات من ملف .env"
+          else
+            echo "⚠️ ملف .env غير موجود! يرجى التأكد من رفعه."
+          fi
+
       - name: Enable KVM (تسريع الهاردوير)
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -30,8 +39,6 @@ jobs:
           echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "system-images;android-29;google_apis;x86_64"
 
       - name: Download and Restore Full AVD Snapshot (تحميل النسخة الاحتياطية)
-        env:
-          SNAPSHOT_URL: https://github.com/ti7qp/borichen/releases/download/2/perfect_snapshot_full.tar.gz
         run: |
           # تجهيز مسار المحاكي
           mkdir -p ~/.android/avd/test.avd
@@ -44,13 +51,21 @@ jobs:
           target=android-29
           EOF
           
-          echo "⬇️ جاري تحميل Snapshot من الرابط: $SNAPSHOT_URL"
-          wget -q "$SNAPSHOT_URL" -O /tmp/snapshot.tar.gz
+          echo "⬇️ جاري تحميل Snapshot من الرابط: ${{ env.SNAPSHOT }}"
+          wget -q "${{ env.SNAPSHOT }}" -O /tmp/snapshot.tar.gz
           
           echo "📦 جاري فك الضغط لاستعادة المحاكي بالكامل..."
           tar -xzvf /tmp/snapshot.tar.gz -C ~/.android/avd/test.avd/
           
-          # استخراج اسم الـ Snapshot تلقائياً لو كان المضغوط هو مجلد snapshots فقط
+          # استعادة الروت (ramdisk) لو موجود
+          if [ -f ~/.android/avd/test.avd/patched_ramdisk.img ]; then
+            echo "🔄 تم العثور على patched_ramdisk.img، جاري استعادته لملفات النظام الأساسية..."
+            cp ~/.android/avd/test.avd/patched_ramdisk.img /usr/local/lib/android/sdk/system-images/android-29/google_apis/x86_64/ramdisk.img
+          else
+            echo "⚠️ تنبيه: ملف patched_ramdisk.img غير موجود! قد تفقد الروت."
+          fi
+          
+          # استخراج اسم الـ Snapshot تلقائياً
           if [ -d ~/.android/avd/test.avd/snapshots ]; then
             SNAP_NAME=$(ls ~/.android/avd/test.avd/snapshots/ | grep -v 'default_boot' | head -1)
             echo "SNAPSHOT_NAME=$SNAP_NAME" >> $GITHUB_ENV
