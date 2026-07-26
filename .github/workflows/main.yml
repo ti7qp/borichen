@@ -51,8 +51,8 @@ jobs:
           target=android-29
           EOF
           
-          echo "⬇️ جاري تحميل Snapshot من الرابط: ${{ env.SNAPSHOT }}"
-          wget -q "${{ env.SNAPSHOT }}" -O /tmp/snapshot.tar.gz
+          echo "⬇️ جاري تحميل Snapshot من الرابط..."
+          wget -q "${{ secrets.SNAPSHOT }}" -O /tmp/snapshot.tar.gz
           
           echo "📦 جاري فك الضغط لاستعادة المحاكي بالكامل..."
           tar -xzvf /tmp/snapshot.tar.gz -C ~/.android/avd/test.avd/
