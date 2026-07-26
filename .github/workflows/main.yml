@@ -1,4 +1,4 @@
-name: Run Android Emulator (SNAPSHOT FAST BOOT)
+name: Run Android Emulator with UI
 on: 
   workflow_dispatch:
 
@@ -8,15 +8,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Load .env variables
-        run: |
-          if [ -f .env ]; then
-            cat .env >> $GITHUB_ENV
-            echo "✅ تم تحميل المتغيرات من ملف .env"
-          else
-            echo "⚠️ ملف .env غير موجود! يرجى التأكد من رفعه."
-          fi
 
       - name: Enable KVM (تسريع الهاردوير)
         run: |
@@ -34,45 +25,18 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
-      - name: Install System Image
+      - name: Install System Image and Patch with Magisk (تثبيت وتفليش Magisk)
         run: |
-          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "system-images;android-29;google_apis;x86_64"
-
-      - name: Download and Restore Full AVD Snapshot (تحميل النسخة الاحتياطية)
-        run: |
-          # تجهيز مسار المحاكي
-          mkdir -p ~/.android/avd/test.avd
+          # تثبيت صورة النظام (Android 11 - API 30 لدعم برامج ARM)
+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "system-images;android-30;google_apis;x86_64"
           
-          # إنشاء ملف test.ini عشان النظام يتعرف على المحاكي
-          cat > ~/.android/avd/test.ini << 'EOF'
-          avd.ini.encoding=UTF-8
-          path=/home/runner/.android/avd/test.avd
-          path.rel=avd/test.avd
-          target=android-29
-          EOF
-          
-          echo "⬇️ جاري تحميل Snapshot من الرابط..."
-          wget -q "${{ secrets.SNAPSHOT }}" -O /tmp/snapshot.tar.gz
-          
-          echo "📦 جاري فك الضغط لاستعادة المحاكي بالكامل..."
-          tar -xzvf /tmp/snapshot.tar.gz -C ~/.android/avd/test.avd/
-          
-          # استعادة الروت (ramdisk) لو موجود
-          if [ -f ~/.android/avd/test.avd/patched_ramdisk.img ]; then
-            echo "🔄 تم العثور على patched_ramdisk.img، جاري استعادته لملفات النظام الأساسية..."
-            cp ~/.android/avd/test.avd/patched_ramdisk.img /usr/local/lib/android/sdk/system-images/android-29/google_apis/x86_64/ramdisk.img
-          else
-            echo "⚠️ تنبيه: ملف patched_ramdisk.img غير موجود! قد تفقد الروت."
-          fi
-          
-          # استخراج اسم الـ Snapshot تلقائياً
-          if [ -d ~/.android/avd/test.avd/snapshots ]; then
-            SNAP_NAME=$(ls ~/.android/avd/test.avd/snapshots/ | grep -v 'default_boot' | head -1)
-            echo "SNAPSHOT_NAME=$SNAP_NAME" >> $GITHUB_ENV
-            echo "✅ تم العثور على Snapshot: $SNAP_NAME"
-          else
-            echo "⚠️ تنبيه: مجلد snapshots غير موجود! ربما الملف المضغوط لا يحتوي عليه."
-          fi
+          # تحميل وتفليش الروت (قبل ما المحاكي يشتغل عشان نتجنب مشكلة الـ Multiple Emulators)
+          git clone https://github.com/newbit1/rootAVD.git
+          cd rootAVD
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          echo "⏳ جاري تفليش Magisk في النظام..."
+          ./rootAVD.sh system-images/android-30/google_apis/x86_64/ramdisk.img || true
+          echo "✅ تم تفليش Magisk والصورة جاهزة للإقلاع!"
 
       - name: Start Screen and VNC Server
         run: |
@@ -88,20 +52,74 @@ jobs:
           echo "👉  $TS_IP  👈"
           echo "=========================================================="
 
-      - name: Run Emulator from Snapshot
+      - name: Create Emulator Script
         run: |
-          echo "🚀 جاري تشغيل المحاكي..."
-          if [ -n "$SNAPSHOT_NAME" ]; then
-            echo "يتم الإقلاع باستخدام Snapshot: $SNAPSHOT_NAME"
-            DISPLAY=:0 /usr/local/lib/android/sdk/emulator/emulator -avd test -gpu swiftshader_indirect -noaudio -no-boot-anim -snapshot $SNAPSHOT_NAME &
-          else
-            DISPLAY=:0 /usr/local/lib/android/sdk/emulator/emulator -avd test -gpu swiftshader_indirect -noaudio -no-boot-anim &
-          fi
+          cat > $GITHUB_WORKSPACE/run_emulator.sh << 'EOF'
+          #!/bin/bash
+          echo "⏳ جاري تجهيز إعدادات الروت و LSPosed..."
           
-          # ننتظر لحد ما يفتح
+          # تثبيت تطبيق Magisk (لأن التفليش حصل والمحاكي مقفول)
+          /usr/local/lib/android/sdk/platform-tools/adb install ~/work/android-emulator-runner/android-emulator-runner/rootAVD/Apps/Magisk.apk || true
+          
+          # ==========================================
+          # 3. المرحلة الثالثة: إعطاء الصلاحيات تلقائياً وتفعيل Zygisk
+          # ==========================================
+          # تفعيل الروت لـ ADB نفسه
+          /usr/local/lib/android/sdk/platform-tools/adb root
+          sleep 3
+          
+          # إعطاء الروت لأي تطبيق أوتوماتيك (بدون سؤال)
+          /usr/local/lib/android/sdk/platform-tools/adb shell "magisk --sqlite \"REPLACE INTO settings (key, value) VALUES ('su_auto_response', 2);\""
+          
+          # تفعيل خاصية Zygisk (الضرورية لبرنامج LSPosed)
+          /usr/local/lib/android/sdk/platform-tools/adb shell "magisk --sqlite \"REPLACE INTO settings (key, value) VALUES ('zygisk', 1);\""
+          
+          # ==========================================
+          # 4. المرحلة الرابعة: تخطي رسالة "Additional Setup" برمجياً
+          # ==========================================
+          /usr/local/lib/android/sdk/platform-tools/adb shell monkey -p com.topjohnwu.magisk -c android.intent.category.LAUNCHER 1
+          sleep 5
+          /usr/local/lib/android/sdk/platform-tools/adb shell input keyevent 22
+          /usr/local/lib/android/sdk/platform-tools/adb shell input keyevent 66
+          
+          # ننتظر المحاكي يعمل ريستارت ويفتح تاني بعد التهيئة
           /usr/local/lib/android/sdk/platform-tools/adb wait-for-device
+          sleep 30
+          
+          # ==========================================
+          # 5. المرحلة الخامسة: تحميل وتثبيت LSPosed
+          # ==========================================
+          wget https://github.com/LSPosed/LSPosed/releases/download/v1.9.2/LSPosed-v1.9.2-7024-zygisk-release.zip -O lsposed.zip
+          /usr/local/lib/android/sdk/platform-tools/adb push lsposed.zip /data/local/tmp/
+          /usr/local/lib/android/sdk/platform-tools/adb shell su -c "magisk --install-module /data/local/tmp/lsposed.zip"
+          
+          # ==========================================
+          # 6. المرحلة الأخيرة: الريستارت النهائي والتنظيف
+          # ==========================================
+          /usr/local/lib/android/sdk/platform-tools/adb reboot
+          /usr/local/lib/android/sdk/platform-tools/adb wait-for-device
+          sleep 30
+          
+          rm lsposed.zip
+          /usr/local/lib/android/sdk/platform-tools/adb shell rm /data/local/tmp/lsposed.zip
           
           echo "=========================================================="
-          echo "✅ المحاكي جاهز! تم تحميل الـ SNAPSHOT بنجاح"
+          echo "✅ تم بنجاح! الروت يعمل، الصلاحيات تلقائية، و LSPosed مفعل."
+          echo "✅ المحاكي جاهز! يمكنك الدخول عبر VNC"
           echo "=========================================================="
           sleep 21600
+          EOF
+          chmod +x $GITHUB_WORKSPACE/run_emulator.sh
+
+      - name: Start Android Emulator with Root
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          DISPLAY: :0
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            bash $GITHUB_WORKSPACE/run_emulator.sh
