@@ -9,6 +9,12 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Load .env variables
+        run: |
+          if [ -f .env ]; then
+            cat .env >> $GITHUB_ENV
+          fi
+
       - name: Enable KVM (تسريع الهاردوير)
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -25,32 +31,37 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
-      - name: Install System Image and Patch with Magisk (تثبيت وتفليش Magisk)
+      - name: Install System Image
         run: |
-          # تثبيت صورة النظام أولاً
-          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "system-images;android-29;default;x86_64"
-          
-          # تحميل rootAVD لتثبيت Magisk
-          git clone https://github.com/newbit1/rootAVD.git
-          cd rootAVD
-          
-          # عرض الصور المتاحة للتأكد من المسار
-          ./rootAVD.sh ListAllAVDs
-          
-          # تفليش Magisk في صورة النظام
-          echo "⏳ جاري تفليش Magisk..."
-          ./rootAVD.sh $ANDROID_SDK_ROOT/system-images/android-29/default/x86_64/ramdisk.img
-          echo "✅ تم تفليش Magisk بنجاح!"
+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "system-images;android-29;google_apis;x86_64"
 
-      - name: Download LSPosed (تحميل LSPosed)
+      - name: Download and Restore Full AVD Snapshot (تحميل النسخة الاحتياطية)
         run: |
-          LSPOSED_URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest | grep -oP 'https://[^"]*LSPosed-v[^"]*-zygisk-release\.zip' | head -1)
-          if [ -n "$LSPOSED_URL" ]; then
-            wget -q "$LSPOSED_URL" -O $GITHUB_WORKSPACE/LSPosed.zip
+          # تجهيز مسار المحاكي
+          mkdir -p ~/.android/avd/test.avd
+          
+          # إنشاء ملف test.ini عشان النظام يتعرف على المحاكي
+          cat > ~/.android/avd/test.ini << 'EOF'
+          avd.ini.encoding=UTF-8
+          path=/home/runner/.android/avd/test.avd
+          path.rel=avd/test.avd
+          target=android-29
+          EOF
+          
+          echo "⬇️ جاري تحميل Snapshot من الرابط..."
+          wget -q "${{ env.SNAPSHOT }}" -O /tmp/snapshot.tar.gz
+          
+          echo "📦 جاري فك الضغط لاستعادة المحاكي بالكامل..."
+          tar -xzvf /tmp/snapshot.tar.gz -C ~/.android/avd/test.avd/
+          
+          # استخراج اسم الـ Snapshot تلقائياً لو كان المضغوط هو مجلد snapshots فقط
+          if [ -d ~/.android/avd/test.avd/snapshots ]; then
+            SNAP_NAME=$(ls ~/.android/avd/test.avd/snapshots/ | grep -v 'default_boot' | head -1)
+            echo "SNAPSHOT_NAME=$SNAP_NAME" >> $GITHUB_ENV
+            echo "✅ تم العثور على Snapshot: $SNAP_NAME"
           else
-            wget -q "https://github.com/LSPosed/LSPosed/releases/download/v1.9.2/LSPosed-v1.9.2-7024-zygisk-release.zip" -O $GITHUB_WORKSPACE/LSPosed.zip
+            echo "⚠️ تنبيه: مجلد snapshots غير موجود! ربما الملف المضغوط لا يحتوي عليه."
           fi
-          echo "✅ تم تحميل LSPosed"
 
       - name: Start Screen and VNC Server
         run: |
@@ -66,64 +77,20 @@ jobs:
           echo "👉  $TS_IP  👈"
           echo "=========================================================="
 
-      - name: Create Emulator Script
+      - name: Run Emulator from Snapshot
         run: |
-          cat > $GITHUB_WORKSPACE/run_emulator.sh << 'EOF'
-          #!/bin/bash
-          echo "⏳ جاري تجهيز Magisk و LSPosed..."
-          
-          # تشغيل adb كروت
-          adb root
-          sleep 5
-          
-          # فحص حالة Magisk
-          echo "🔍 فحص Magisk..."
-          adb shell "magisk -v" 2>/dev/null && echo "✅ Magisk يعمل!" || echo "⚠️ Magisk غير متاح، سيتم المتابعة..."
-          
-          # تحميل وتثبيت تطبيق Magisk (الواجهة)
-          echo "⬇️ جاري تثبيت تطبيق Magisk Manager..."
-          MAGISK_APK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -oP 'https://[^"]*Magisk-v[^"]*\.apk' | head -1)
-          if [ -n "$MAGISK_APK_URL" ]; then
-            wget -q "$MAGISK_APK_URL" -O $GITHUB_WORKSPACE/magisk.apk
-            adb install $GITHUB_WORKSPACE/magisk.apk || echo "⚠️ فشل تثبيت تطبيق Magisk"
+          echo "🚀 جاري تشغيل المحاكي..."
+          if [ -n "$SNAPSHOT_NAME" ]; then
+            echo "يتم الإقلاع باستخدام Snapshot: $SNAPSHOT_NAME"
+            DISPLAY=:0 /usr/local/lib/android/sdk/emulator/emulator -avd test -gpu swiftshader_indirect -noaudio -no-boot-anim -snapshot $SNAPSHOT_NAME &
+          else
+            DISPLAY=:0 /usr/local/lib/android/sdk/emulator/emulator -avd test -gpu swiftshader_indirect -noaudio -no-boot-anim &
           fi
           
-          # تفعيل Zygisk (مطلوب لـ LSPosed)
-          adb shell "magisk --sqlite \"REPLACE INTO settings (key,value) VALUES('zygisk',1);\"" 2>/dev/null || true
-          
-          # تثبيت LSPosed كموديول Magisk
-          if [ -f "$GITHUB_WORKSPACE/LSPosed.zip" ]; then
-            adb push $GITHUB_WORKSPACE/LSPosed.zip /sdcard/LSPosed.zip
-            if adb shell "magisk --install-module /sdcard/LSPosed.zip" 2>/dev/null; then
-              echo "✅ تم تثبيت LSPosed! جاري إعادة التشغيل..."
-              adb reboot
-              sleep 40
-              adb wait-for-device
-              sleep 20
-              adb root
-              sleep 3
-            else
-              echo "⚠️ لم يتم تثبيت LSPosed، قد يحتاج تثبيت يدوي"
-            fi
-          fi
+          # ننتظر لحد ما يفتح
+          /usr/local/lib/android/sdk/platform-tools/adb wait-for-device
           
           echo "=========================================================="
-          echo "✅ المحاكي جاهز! يمكنك الدخول عبر VNC"
+          echo "✅ المحاكي جاهز! تم تحميل الـ SNAPSHOT بنجاح"
           echo "=========================================================="
           sleep 21600
-          EOF
-          chmod +x $GITHUB_WORKSPACE/run_emulator.sh
-
-      - name: Start Android Emulator with Root
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          DISPLAY: :0
-        with:
-          api-level: 29
-          target: default
-          arch: x86_64
-          profile: pixel_6
-          emulator-options: -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: |
-            bash $GITHUB_WORKSPACE/run_emulator.sh
-
