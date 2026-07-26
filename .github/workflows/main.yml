@@ -1,0 +1,129 @@
+name: Run Android Emulator with UI
+on: 
+  workflow_dispatch:
+
+jobs:
+  run-emulator:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Enable KVM (تسريع الهاردوير)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install Desktop & VNC (تثبيت واجهة وشاشة وهمية)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xvfb x11vnc dbus-x11
+
+      - name: Setup Tailscale (تجهيز الاتصال الآمن)
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
+      - name: Install System Image and Patch with Magisk (تثبيت وتفليش Magisk)
+        run: |
+          # تثبيت صورة النظام أولاً
+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "system-images;android-29;default;x86_64"
+          
+          # تحميل rootAVD لتثبيت Magisk
+          git clone https://github.com/newbit1/rootAVD.git
+          cd rootAVD
+          
+          # عرض الصور المتاحة للتأكد من المسار
+          ./rootAVD.sh ListAllAVDs
+          
+          # تفليش Magisk في صورة النظام
+          echo "⏳ جاري تفليش Magisk..."
+          ./rootAVD.sh $ANDROID_SDK_ROOT/system-images/android-29/default/x86_64/ramdisk.img
+          echo "✅ تم تفليش Magisk بنجاح!"
+
+      - name: Download LSPosed (تحميل LSPosed)
+        run: |
+          LSPOSED_URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest | grep -oP 'https://[^"]*LSPosed-v[^"]*-zygisk-release\.zip' | head -1)
+          if [ -n "$LSPOSED_URL" ]; then
+            wget -q "$LSPOSED_URL" -O $GITHUB_WORKSPACE/LSPosed.zip
+          else
+            wget -q "https://github.com/LSPosed/LSPosed/releases/download/v1.9.2/LSPosed-v1.9.2-7024-zygisk-release.zip" -O $GITHUB_WORKSPACE/LSPosed.zip
+          fi
+          echo "✅ تم تحميل LSPosed"
+
+      - name: Start Screen and VNC Server
+        run: |
+          Xvfb :0 -screen 0 1920x1080x24 &
+          sleep 2
+          DISPLAY=:0 xfce4-session &
+          x11vnc -display :0 -nopw -xkb -ncache 10 -ncache_cr -forever &
+          
+          TS_IP=$(tailscale ip -4)
+          echo "=========================================================="
+          echo "✅ الاتصال جاهز عبر Tailscale!"
+          echo "انسخ هذا الـ IP وضعه في برنامج VNC Viewer للاتصال:"
+          echo "👉  $TS_IP  👈"
+          echo "=========================================================="
+
+      - name: Create Emulator Script
+        run: |
+          cat > $GITHUB_WORKSPACE/run_emulator.sh << 'EOF'
+          #!/bin/bash
+          echo "⏳ جاري تجهيز Magisk و LSPosed..."
+          
+          # تشغيل adb كروت
+          adb root
+          sleep 5
+          
+          # فحص حالة Magisk
+          echo "🔍 فحص Magisk..."
+          adb shell "magisk -v" 2>/dev/null && echo "✅ Magisk يعمل!" || echo "⚠️ Magisk غير متاح، سيتم المتابعة..."
+          
+          # تحميل وتثبيت تطبيق Magisk (الواجهة)
+          echo "⬇️ جاري تثبيت تطبيق Magisk Manager..."
+          MAGISK_APK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -oP 'https://[^"]*Magisk-v[^"]*\.apk' | head -1)
+          if [ -n "$MAGISK_APK_URL" ]; then
+            wget -q "$MAGISK_APK_URL" -O $GITHUB_WORKSPACE/magisk.apk
+            adb install $GITHUB_WORKSPACE/magisk.apk || echo "⚠️ فشل تثبيت تطبيق Magisk"
+          fi
+          
+          # تفعيل Zygisk (مطلوب لـ LSPosed)
+          adb shell "magisk --sqlite \"REPLACE INTO settings (key,value) VALUES('zygisk',1);\"" 2>/dev/null || true
+          
+          # تثبيت LSPosed كموديول Magisk
+          if [ -f "$GITHUB_WORKSPACE/LSPosed.zip" ]; then
+            adb push $GITHUB_WORKSPACE/LSPosed.zip /sdcard/LSPosed.zip
+            if adb shell "magisk --install-module /sdcard/LSPosed.zip" 2>/dev/null; then
+              echo "✅ تم تثبيت LSPosed! جاري إعادة التشغيل..."
+              adb reboot
+              sleep 40
+              adb wait-for-device
+              sleep 20
+              adb root
+              sleep 3
+            else
+              echo "⚠️ لم يتم تثبيت LSPosed، قد يحتاج تثبيت يدوي"
+            fi
+          fi
+          
+          echo "=========================================================="
+          echo "✅ المحاكي جاهز! يمكنك الدخول عبر VNC"
+          echo "=========================================================="
+          sleep 21600
+          EOF
+          chmod +x $GITHUB_WORKSPACE/run_emulator.sh
+
+      - name: Start Android Emulator with Root
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          DISPLAY: :0
+        with:
+          api-level: 29
+          target: default
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            bash $GITHUB_WORKSPACE/run_emulator.sh
+
