@@ -1,4 +1,4 @@
-name: Run Android Emulator with UI
+name: Run Android Emulator (SNAPSHOT FAST BOOT)
 on: 
   workflow_dispatch:
 
